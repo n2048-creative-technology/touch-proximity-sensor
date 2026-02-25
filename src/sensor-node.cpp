@@ -73,10 +73,11 @@ void setup() {
   pkt.id[0] = mac_sta[3]; pkt.id[1] = mac_sta[4]; pkt.id[2] = mac_sta[5];
 
   // Baselines
+  delay(800); // let readings settle with long wires
   for (int i = 0; i < NUM_CH; i++) {
     long s = 0;
-    for (int k = 0; k < 32; k++) { s += touchRead(TOUCH_PINS[i]); delay(3); }
-    baseline[i] = s / 32.0f;
+    for (int k = 0; k < 200; k++) { s += touchRead(TOUCH_PINS[i]); delay(3); }
+    baseline[i] = s / 200.0f;
     filt[i] = baseline[i];
   }
 }
