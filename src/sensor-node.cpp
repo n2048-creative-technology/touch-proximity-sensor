@@ -3,12 +3,22 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include "RadarSensor.h"
+
+#define RADAR_RX_PIN 1
+#define RADAR_TX_PIN 2
+
+#define MIN_DISTANCE_MM 0.0f
+#define MAX_DISTANCE_MM 2000.0f
+#define LED_HOLD_MS 10000UL
+
+RadarSensor radar(RADAR_RX_PIN, RADAR_TX_PIN); // ESP RX/TX pins connected to sensor TX/RX
 
 // ---------- CONFIG ----------
 #define MAX_CH 32
 // ESP32-S3 touch pins are typically GPIO 1..14. Trim to what you actually wire.
 // (Avoid any pins reserved by your board; start with 1..14 and remove as needed.)
-int TOUCH_PINS[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14};
+int TOUCH_PINS[] = {8,3,9,10,11,12,13,14};
 const int NUM_CH = min((int)(sizeof(TOUCH_PINS)/sizeof(TOUCH_PINS[0])), MAX_CH);
 
 // Filters
@@ -26,7 +36,16 @@ struct TouchPacket {
   uint16_t seq;      // sequence (wraps)
   uint32_t ms;       // millis() at sender
   uint16_t v[MAX_CH];// filtered touch values (lower == more touch)
+
+  //radar:
+  float distance;  // mm
+  float angle;     // degrees
+  float speed;     // cm/s (unknown; 0 if not provided)
+  int16_t x;       // mm
+  int16_t y;       // mm
+  bool detected;
 };
+
 #pragma pack(pop)
 
 TouchPacket pkt;
@@ -34,6 +53,8 @@ float baseline[MAX_CH];
 float filt[MAX_CH];
 uint16_t seq = 0;
 uint8_t mac_sta[6];
+
+RadarTarget tgt;
 
 // Broadcast peer FF:FF:FF:FF:FF:FF
 static const uint8_t BCAST[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -60,9 +81,9 @@ void initESPNow() {
 
 void setup() {
   #if ARDUINO_USB_CDC_ON_BOOT
-    Serial.begin(115200);
+    Serial.begin(921600);
   #else
-    Serial.begin(115200);
+    Serial.begin(921600);
   #endif
   delay(200);
 
@@ -80,11 +101,19 @@ void setup() {
     baseline[i] = s / 200.0f;
     filt[i] = baseline[i];
   }
+
+  btStop();
+  radar.begin(256000);
 }
 
 void loop() {
+
   static uint32_t lastSend = 0;
   uint32_t now = millis();
+
+  if (radar.update()) {
+    tgt = radar.getTarget();
+  }
 
   // Read & filter
   for (int i = 0; i < NUM_CH; i++) {
@@ -104,10 +133,50 @@ void loop() {
       if (v < 0) v = 0; if (v > 65535) v = 65535;
       pkt.v[i] = (uint16_t)v;
     }
-    size_t len = sizeof(pkt.ver) + sizeof(pkt.n) + sizeof(pkt.id) + sizeof(pkt.seq) + sizeof(pkt.ms) + pkt.n*sizeof(uint16_t);
-    esp_now_send(BCAST, (uint8_t*)&pkt, len);
+
+    //radar
+    pkt.distance = tgt.distance;
+    pkt.angle = tgt.angle;
+    pkt.speed = tgt.speed;
+    pkt.x = tgt.x;
+    pkt.y = tgt.y;
+    pkt.detected = tgt.detected;
+
+    // Serialize packed payload so radar fields are placed right after the n touch values.
+    uint8_t tx[2 + 3 + 2 + 4 + (MAX_CH * 2) + 4 + 4 + 4 + 2 + 2 + 1];
+    int off = 0;
+    tx[off++] = pkt.ver;
+    tx[off++] = pkt.n;
+    memcpy(tx + off, pkt.id, 3); off += 3;
+    memcpy(tx + off, &pkt.seq, sizeof(pkt.seq)); off += sizeof(pkt.seq);
+    memcpy(tx + off, &pkt.ms, sizeof(pkt.ms)); off += sizeof(pkt.ms);
+    memcpy(tx + off, pkt.v, (size_t)pkt.n * sizeof(uint16_t)); off += (int)pkt.n * (int)sizeof(uint16_t);
+    memcpy(tx + off, &pkt.distance, sizeof(pkt.distance)); off += sizeof(pkt.distance);
+    memcpy(tx + off, &pkt.angle, sizeof(pkt.angle)); off += sizeof(pkt.angle);
+    memcpy(tx + off, &pkt.speed, sizeof(pkt.speed)); off += sizeof(pkt.speed);
+    memcpy(tx + off, &pkt.x, sizeof(pkt.x)); off += sizeof(pkt.x);
+    memcpy(tx + off, &pkt.y, sizeof(pkt.y)); off += sizeof(pkt.y);
+    memcpy(tx + off, &pkt.detected, sizeof(pkt.detected)); off += sizeof(pkt.detected);
+
+    esp_now_send(BCAST, tx, off);
   }
 
+  // Radar data (if provided)
+  if (pkt.detected) {
+    Serial.print("radar,1,");
+    Serial.print(pkt.distance);
+    Serial.print(',');
+    Serial.print(pkt.angle);
+    Serial.print(',');
+    Serial.print(pkt.speed);
+    Serial.print(',');
+    Serial.print(pkt.x);
+    Serial.print(',');
+    Serial.println(pkt.y);
+  }
+  else {
+    Serial.println("radar,0,0.0,0.0,0.0,0,0");
+  }
   // No delay = max sensor rate; keep wires short to avoid noise.
 }
 

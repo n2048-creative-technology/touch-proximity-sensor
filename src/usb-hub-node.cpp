@@ -12,6 +12,14 @@ struct TouchPacket {
   uint16_t seq;
   uint32_t ms;
   uint16_t v[32];
+
+    //radar:
+  float distance;  // mm
+  float angle;     // degrees
+  float speed;     // cm/s (unknown; 0 if not provided)
+  int16_t x;       // mm
+  int16_t y;       // mm
+  bool detected;
 };
 #pragma pack(pop)
 
@@ -19,9 +27,33 @@ volatile bool pktReady = false;
 TouchPacket pkt;
 uint8_t lastSender[6];
 
-void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  if (len < (int)(sizeof(uint8_t)*2 + 3 + sizeof(uint16_t) + sizeof(uint32_t))) return;
-  memcpy((void*)&pkt, data, min(len, (int)sizeof(TouchPacket)));
+void onRecv(const uint8_t* mac, const uint8_t* data, int len) {  
+  const int baseLen = (int)(sizeof(uint8_t) + sizeof(uint8_t) + 3 + sizeof(uint16_t) + sizeof(uint32_t));
+  const int radarLen = (int)(sizeof(float) + sizeof(float) + sizeof(float) + sizeof(int16_t) + sizeof(int16_t) + sizeof(bool));
+  if (len < baseLen + radarLen) return;
+
+  const uint8_t n = data[1];
+  if (n > 32) return;
+
+  const int expectedLen = baseLen + (int)n * (int)sizeof(uint16_t) + radarLen;
+  if (len < expectedLen) return;
+
+  memset((void*)&pkt, 0, sizeof(pkt));
+  pkt.ver = data[0];
+  pkt.n = n;
+
+  int off = 2;
+  memcpy((void*)pkt.id, data + off, 3); off += 3;
+  memcpy((void*)&pkt.seq, data + off, sizeof(pkt.seq)); off += sizeof(pkt.seq);
+  memcpy((void*)&pkt.ms, data + off, sizeof(pkt.ms)); off += sizeof(pkt.ms);
+  memcpy((void*)pkt.v, data + off, (size_t)pkt.n * sizeof(uint16_t)); off += (int)pkt.n * (int)sizeof(uint16_t);
+  memcpy((void*)&pkt.distance, data + off, sizeof(pkt.distance)); off += sizeof(pkt.distance);
+  memcpy((void*)&pkt.angle, data + off, sizeof(pkt.angle)); off += sizeof(pkt.angle);
+  memcpy((void*)&pkt.speed, data + off, sizeof(pkt.speed)); off += sizeof(pkt.speed);
+  memcpy((void*)&pkt.x, data + off, sizeof(pkt.x)); off += sizeof(pkt.x);
+  memcpy((void*)&pkt.y, data + off, sizeof(pkt.y)); off += sizeof(pkt.y);
+  memcpy((void*)&pkt.detected, data + off, sizeof(pkt.detected));
+
   memcpy((void*)lastSender, mac, 6);
   pktReady = true;
 }
@@ -65,6 +97,25 @@ void loop() {
     Serial.print(',');
     Serial.print((int)p.v[i]);
   }
+
+    Serial.print(',');  
+  // Radar data (if provided)
+  if (p.detected) {
+    Serial.print("radar,1,");
+    Serial.print(p.distance);
+    Serial.print(',');
+    Serial.print(p.angle);
+    Serial.print(',');
+    Serial.print(p.speed);
+    Serial.print(',');
+    Serial.print(p.x);
+    Serial.print(',');
+    Serial.print(p.y);
+  }
+  else {
+    Serial.print("radar,0,0.0,0.0,0.0,0.0,0.0");
+  }   
+
   Serial.print('\n');
 }
 
