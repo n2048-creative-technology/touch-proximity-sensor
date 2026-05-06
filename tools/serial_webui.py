@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Web UI for ESP32 touch stream.
+Web UI for ESP32 radar node stream.
 
 Run:
   python3 tools/serial_webui.py --port /dev/ttyUSB0
@@ -8,7 +8,7 @@ Then open:
   http://localhost:8000
 
 Line format (from firmware):
-  touch,<mac12>,<id3>,<seq>,<ms>,<n>,v1,v2,...,vn
+  <id3>,<ms>,<distance>,<angle>,<speed>,<detected>
 """
 
 import argparse
@@ -17,7 +17,7 @@ import json
 import threading
 import site
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 # Ensure user site-packages are visible (common on systems with locked site-packages)
 if site.ENABLE_USER_SITE:
@@ -50,187 +50,229 @@ HTML_PAGE = """<!doctype html>
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Touch Stream</title>
+  <title>Radar Nodes</title>
   <style>
     :root {
       --bg: #0b0f14;
       --panel: #111827;
       --accent: #2dd4bf;
+      --accent-2: #38bdf8;
+      --danger: #fb7185;
       --muted: #94a3b8;
-      --bar: #2c7fb8;
-      --bar-bg: #1f2937;
+      --line: #263244;
+      --text: #e2e8f0;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; padding: 16px;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-      color: #e2e8f0; background: var(--bg);
+      color: var(--text); background: var(--bg);
     }
-    .wrap { max-width: 980px; margin: 0 auto; }
+    .wrap { max-width: 1180px; margin: 0 auto; }
     .title { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
     .panel {
       background: var(--panel);
       border: 1px solid #1f2937;
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 12px;
       margin-bottom: 12px;
     }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; align-items: end; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    input {
+    select, input {
       width: 100%; padding: 8px 10px; border-radius: 8px;
       border: 1px solid #334155; background: #0f172a; color: #e2e8f0;
     }
     .status { font-size: 12px; color: var(--muted); }
-    .bars { display: grid; gap: 8px; }
-    .bar-row { display: grid; grid-template-columns: 60px 1fr 80px; gap: 8px; align-items: center; }
-    .bar-label { font-size: 12px; color: var(--muted); }
-    .bar-track { height: 18px; background: var(--bar-bg); border-radius: 9px; overflow: hidden; }
-    .bar-fill { height: 100%; width: 0%; background: var(--bar); transition: width 0.08s linear; }
-    .bar-val { font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; color: #cbd5f5; }
+    .node-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+    .node-card { background: #0f172a; border: 1px solid #243144; border-radius: 8px; padding: 12px; }
+    .node-card.hidden { display: none; }
+    .node-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+    .node-id { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .node-age { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .readings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .reading { border: 1px solid #1f2c3d; border-radius: 8px; padding: 8px; min-width: 0; }
+    .reading-label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+    .reading-value { font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .radar { width: 100%; aspect-ratio: 1; display: block; background: #08111d; border: 1px solid #1f2c3d; border-radius: 8px; }
+    .empty { color: var(--muted); text-align: center; padding: 36px 12px; }
     @media (max-width: 720px) {
-      .row { grid-template-columns: 1fr; }
-      .bar-row { grid-template-columns: 44px 1fr 64px; }
+      body { padding: 10px; }
+      .controls, .readings { grid-template-columns: 1fr; }
+      .node-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <div class=\"wrap\">
-    <div class=\"title\">Touch Stream</div>
+    <div class=\"title\">Radar Nodes</div>
 
     <div class=\"panel\">
-      <div class=\"row\">
+      <div class=\"controls\">
         <div>
-          <label for=\"mac\">MAC filter</label>
-          <select id=\"mac\"></select>
+          <label for=\"nodeFilter\">Node view</label>
+          <select id=\"nodeFilter\">
+            <option value=\"all\">All nodes</option>
+          </select>
         </div>
         <div>
-          <label for=\"min\">Min values (comma list)</label>
-          <input id=\"min\" placeholder=\"0,0,0,0\" />
+          <label for=\"maxDistance\">Radar range (mm)</label>
+          <input id=\"maxDistance\" type=\"number\" min=\"100\" step=\"100\" value=\"8000\" />
         </div>
         <div>
-          <label for=\"max\">Max values (comma list)</label>
-          <input id=\"max\" placeholder=\"4095,4095,4095,4095\" />
-        </div>
-        <div>
-          <label>Status</label>
+          <label>Serial status</label>
           <div class=\"status\" id=\"status\">Connecting...</div>
         </div>
       </div>
     </div>
 
     <div class=\"panel\">
-      <div class=\"bars\" id=\"bars\"></div>
+      <div class=\"node-grid\" id=\"nodes\"></div>
+      <div class=\"empty\" id=\"empty\">Waiting for detected radar targets...</div>
     </div>
   </div>
 
   <script>
     const statusEl = document.getElementById('status');
-    const macEl = document.getElementById('mac');
-    const minEl = document.getElementById('min');
-    const maxEl = document.getElementById('max');
-    const barsEl = document.getElementById('bars');
+    const nodeFilterEl = document.getElementById('nodeFilter');
+    const maxDistanceEl = document.getElementById('maxDistance');
+    const nodesEl = document.getElementById('nodes');
+    const emptyEl = document.getElementById('empty');
 
     let ws;
-    let autoMac = null;
-    let knownMacs = new Set();
-    let obsMin = [];
-    let obsMax = [];
+    const nodes = new Map();
 
-    function normMac(s) {
-      const hex = (s || '').replace(/[^0-9a-fA-F]/g, '');
-      return hex.length === 12 ? hex.toUpperCase() : null;
+    function fmt(value, suffix, digits = 1) {
+      if (!Number.isFinite(value)) return '--';
+      return `${value.toFixed(digits)} ${suffix}`;
     }
 
-    function loadSelectedMac() {
-      const saved = localStorage.getItem('selectedMac');
-      return saved && normMac(saved) ? saved : null;
-    }
-
-    function saveSelectedMac(mac) {
-      if (mac) localStorage.setItem('selectedMac', mac);
-    }
-
-    function ensureMacOption(mac) {
-      if (knownMacs.has(mac)) return;
-      knownMacs.add(mac);
+    function ensureNodeOption(id) {
+      if (nodeFilterEl.querySelector(`option[value=\"${id}\"]`)) return;
       const opt = document.createElement('option');
-      opt.value = mac;
-      opt.textContent = mac;
-      macEl.appendChild(opt);
+      opt.value = id;
+      opt.textContent = `Node ${id}`;
+      nodeFilterEl.appendChild(opt);
     }
 
-    function parseList(s) {
-      if (!s) return [];
-      return s.split(',').map(v => v.trim()).filter(v => v !== '').map(Number);
+    function makeNodeCard(id) {
+      const card = document.createElement('div');
+      card.className = 'node-card';
+      card.dataset.node = id;
+      card.innerHTML = `
+        <div class=\"node-head\">
+          <div class=\"node-id\">Node ${id}</div>
+          <div class=\"node-age\">--</div>
+        </div>
+        <div class=\"readings\">
+          <div class=\"reading\"><div class=\"reading-label\">Distance</div><div class=\"reading-value\" data-field=\"distance\">--</div></div>
+          <div class=\"reading\"><div class=\"reading-label\">Angle</div><div class=\"reading-value\" data-field=\"angle\">--</div></div>
+          <div class=\"reading\"><div class=\"reading-label\">Speed</div><div class=\"reading-value\" data-field=\"speed\">--</div></div>
+        </div>
+        <canvas class=\"radar\" width=\"480\" height=\"480\"></canvas>
+      `;
+      nodesEl.appendChild(card);
+      return card;
     }
 
-    function expandList(list, n, defVal) {
-      if (!list || list.length === 0) return Array(n).fill(defVal);
-      if (list.length >= n) return list.slice(0, n);
-      const out = list.slice();
-      while (out.length < n) out.push(out[out.length - 1]);
-      return out;
+    function getNode(id) {
+      let node = nodes.get(id);
+      if (node) return node;
+      const card = makeNodeCard(id);
+      node = { id, card, canvas: card.querySelector('canvas'), lastSeen: 0, data: null };
+      nodes.set(id, node);
+      ensureNodeOption(id);
+      return node;
     }
 
-    function ensureBars(n) {
-      if (barsEl.children.length === n) return;
-      barsEl.innerHTML = '';
-      for (let i = 0; i < n; i++) {
-        const row = document.createElement('div');
-        row.className = 'bar-row';
+    function drawRadar(node) {
+      const canvas = node.canvas;
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      const cx = w / 2;
+      const cy = h / 2;
+      const radius = Math.min(w, h) * 0.42;
+      const maxDistance = Math.max(100, Number(maxDistanceEl.value) || 8000);
+      const data = node.data;
 
-        const label = document.createElement('div');
-        label.className = 'bar-label';
-        label.textContent = `v${i}`;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#08111d';
+      ctx.fillRect(0, 0, w, h);
 
-        const track = document.createElement('div');
-        track.className = 'bar-track';
-        const fill = document.createElement('div');
-        fill.className = 'bar-fill';
-        track.appendChild(fill);
-
-        const val = document.createElement('div');
-        val.className = 'bar-val';
-        val.textContent = '0%';
-
-        row.appendChild(label);
-        row.appendChild(track);
-        row.appendChild(val);
-        barsEl.appendChild(row);
+      ctx.strokeStyle = '#263244';
+      ctx.lineWidth = 1;
+      for (let ring = 1; ring <= 4; ring++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius * ring / 4, 0, Math.PI * 2);
+        ctx.stroke();
       }
+
+      for (let deg = 0; deg < 360; deg += 45) {
+        const a = deg * Math.PI / 180;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(a) * radius, cy - Math.sin(a) * radius);
+        ctx.stroke();
+        ctx.fillStyle = '#64748b';
+        ctx.font = '12px ui-sans-serif, system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${deg} deg`, cx + Math.cos(a) * (radius + 20), cy - Math.sin(a) * (radius + 20));
+      }
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${Math.round(maxDistance)} mm`, w - 10, 18);
+
+      if (!data) return;
+
+      const clampedDistance = Math.max(0, Math.min(maxDistance, data.distance));
+      const targetRadius = clampedDistance / maxDistance * radius;
+      const angle = data.angle * Math.PI / 180;
+      const x = cx + Math.cos(angle) * targetRadius;
+      const y = cy - Math.sin(angle) * targetRadius;
+
+      ctx.strokeStyle = 'rgba(45, 212, 191, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+
+      ctx.fillStyle = '#2dd4bf';
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 13, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
-    function updateBars(vals) {
-      const n = vals.length;
-      ensureBars(n);
-
-      if (obsMin.length !== n) obsMin = Array(n).fill(Infinity);
-      if (obsMax.length !== n) obsMax = Array(n).fill(-Infinity);
-
-      for (let i = 0; i < n; i++) {
-        if (vals[i] < obsMin[i]) obsMin[i] = vals[i];
-        if (vals[i] > obsMax[i]) obsMax[i] = vals[i];
+    function applyFilter() {
+      const selected = nodeFilterEl.value;
+      let visible = 0;
+      for (const node of nodes.values()) {
+        const show = selected === 'all' || selected === node.id;
+        node.card.classList.toggle('hidden', !show);
+        if (show) visible++;
       }
+      emptyEl.style.display = visible ? 'none' : 'block';
+    }
 
-      const vminManual = parseList(minEl.value);
-      const vmaxManual = parseList(maxEl.value);
-      const vmin = vminManual.length ? expandList(vminManual, n, 0) : obsMin.slice();
-      const vmax = vmaxManual.length ? expandList(vmaxManual, n, 1023) : obsMax.slice();
+    function updateNode(pkt) {
+      if (!pkt.detected) return;
+      const node = getNode(pkt.id);
+      node.lastSeen = Date.now();
+      node.data = pkt;
 
-      for (let i = 0; i < n; i++) {
-        const lo = vmin[i];
-        const hi = vmax[i];
-        let pct = 0;
-        if (hi > lo) pct = (vals[i] - lo) * 100 / (hi - lo);
-        pct = Math.max(0, Math.min(100, pct));
-
-        const row = barsEl.children[i];
-        const fill = row.children[1].children[0];
-        const val = row.children[2];
-        fill.style.width = pct.toFixed(1) + '%';
-        val.textContent = `${vals[i]}  (${pct.toFixed(1)}%)`;
-      }
+      node.card.querySelector('[data-field=\"distance\"]').textContent = fmt(pkt.distance, 'mm');
+      node.card.querySelector('[data-field=\"angle\"]').textContent = fmt(pkt.angle, 'deg');
+      node.card.querySelector('[data-field=\"speed\"]').textContent = fmt(pkt.speed, 'cm/s');
+      drawRadar(node);
+      applyFilter();
     }
 
     function connect() {
@@ -240,31 +282,29 @@ HTML_PAGE = """<!doctype html>
       ws.onerror = () => { statusEl.textContent = 'Error'; };
       ws.onmessage = (ev) => {
         const pkt = JSON.parse(ev.data);
-        const mac = pkt.mac;
-        if (!mac) return;
-
-        ensureMacOption(mac);
-        if (!autoMac) autoMac = mac;
-
-        const saved = loadSelectedMac();
-        if (saved && macEl.value !== saved) {
-          macEl.value = saved;
-        } else if (!macEl.value) {
-          macEl.value = autoMac;
+        if (pkt.error) {
+          statusEl.textContent = pkt.error;
+          return;
         }
-
-        const target = macEl.value || autoMac;
-        if (target && mac !== target) return;
-
-        updateBars(pkt.values || []);
+        if (!pkt.id) return;
+        updateNode(pkt);
       };
     }
 
     connect();
 
-    macEl.addEventListener('change', () => {
-      saveSelectedMac(macEl.value);
+    nodeFilterEl.addEventListener('change', applyFilter);
+    maxDistanceEl.addEventListener('input', () => {
+      for (const node of nodes.values()) drawRadar(node);
     });
+
+    setInterval(() => {
+      const now = Date.now();
+      for (const node of nodes.values()) {
+        const age = Math.max(0, (now - node.lastSeen) / 1000);
+        node.card.querySelector('.node-age').textContent = `${age.toFixed(1)} s ago`;
+      }
+    }, 250);
   </script>
 </body>
 </html>
@@ -272,23 +312,33 @@ HTML_PAGE = """<!doctype html>
 
 
 def _parse_line(line: str) -> Optional[Dict]:
-    if not line.startswith("touch,"):
-        return None
     parts = line.strip().split(",")
-    if len(parts) < 7:
+    if len(parts) != 6:
         return None
-    mac = parts[1].upper()
+    node_id = parts[0].strip().upper()
+    if len(node_id) != 6:
+        return None
     try:
-        n = int(parts[5])
+        ms = int(parts[1])
+        distance = float(parts[2])
+        angle = float(parts[3])
+        speed = float(parts[4])
     except ValueError:
         return None
-    values: List[int] = []
-    for p in parts[6:6 + n]:
-        try:
-            values.append(int(p))
-        except ValueError:
-            return None
-    return {"mac": mac, "n": n, "values": values}
+
+    detected_text = parts[5].strip().lower()
+    detected = detected_text in ("1", "true", "yes", "on")
+    if not detected:
+        return {"id": node_id, "detected": False}
+
+    return {
+        "id": node_id,
+        "ms": ms,
+        "distance": distance,
+        "angle": angle,
+        "speed": speed,
+        "detected": detected,
+    }
 
 
 class SerialReader(threading.Thread):
@@ -377,9 +427,9 @@ async def on_cleanup(app: web.Application) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Web UI for ESP32 touch stream")
+    ap = argparse.ArgumentParser(description="Web UI for ESP32 radar node stream")
     ap.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyUSB0 or COM3")
-    ap.add_argument("--baud", type=int, default=921600, help="Baud rate (default: 921600)")
+    ap.add_argument("--baud", type=int, default=9600, help="Baud rate (default: 9600)")
     ap.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     ap.add_argument("--http", type=int, default=8000, help="HTTP port (default: 8000)")
     args = ap.parse_args()
