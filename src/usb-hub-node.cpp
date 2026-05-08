@@ -41,15 +41,15 @@ int findNodeIndexLocked(const uint8_t id[3]) {
 }
 
 void printPacket(const RXPacket& p) {
-  Serial.printf("%02X%02X%02X,", p.id[0], p.id[1], p.id[2]);
+  Serial.printf("%02X%02X%02X ", p.id[0], p.id[1], p.id[2]);
   Serial.print(p.ms);
-  Serial.print(',');
+  Serial.print(' ');
   Serial.print(p.distance);
-  Serial.print(',');
+  Serial.print(' ');
   Serial.print(p.angle);
-  Serial.print(',');
+  Serial.print(' ');
   Serial.print(p.speed);
-  Serial.print(',');
+  Serial.print(' ');
   Serial.print(p.detected);
   Serial.print('\n');
 }
